@@ -1,81 +1,58 @@
-name: Build Android APK from ZIP
+name: Robust Multi-Fallback Android Build
 
 on:
   push:
     branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: write
 
 jobs:
   build:
-    name: Auto Unzip, Arrange & Build APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
     steps:
-      - name: 📥 Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ─── گام ۱: باز کردن زیپ به عنوان اولین قدم ─────────────────────────
-      - name: 📦 Detect, Unzip & Auto-Arrange Project
+      # مرحله ۱: استخراج خودکار و ساختاردهی فایل‌ها از فایل‌های متنی یا لاگ‌های پروژه
+      - name: Extract & Organize Source Files
         run: |
-          echo "🔍 Searching for ZIP archive..."
-          ZIP_FILE=$(find . -maxdepth 3 -type f -iname "*.zip" | head -n 1)
+          python3 - << 'EOF'
+          import os, re
 
-          if [ -n "$ZIP_FILE" ]; then
-            echo "📦 Found ZIP file: $ZIP_FILE"
-            echo "Extracting..."
-            mkdir -p temp_extracted
-            unzip -o -q "$ZIP_FILE" -d temp_extracted
+          # گشتن به دنبال فایلی که شامل تگ‌های START OF FILE باشد
+          dump_content = ""
+          for fname in os.listdir('.'):
+              if os.path.isfile(fname) and (fname.endswith('.txt') or fname.endswith('.md') or fname == "project_dump"):
+                  with open(fname, 'r', encoding='utf-8', errors='ignore') as f:
+                      txt = f.read()
+                      if "--- START OF FILE" in txt:
+                          dump_content = txt
+                          break
 
-            # پیدا کردن پوشه اصلی پروژه داخل زیپ
-            ROOT_DIR=$(find temp_extracted -type f \( -name "settings.gradle.kts" -o -name "settings.gradle" -o -name "build.gradle.kts" \) -exec dirname {} \; | head -n 1)
+          if dump_content:
+              pattern = r'---\s*START OF FILE\s+([^\s\-]+)\s*---\n(.*?)((?=---\s*START OF FILE)|$)'
+              matches = re.findall(pattern, dump_content, re.DOTALL)
+              for path, body, _ in matches:
+                  path = path.strip()
+                  os.makedirs(os.path.dirname(path), exist_ok=True)
+                  with open(path, 'w', encoding='utf-8') as out:
+                      out.write(body.strip() + "\n")
+                  print(f"Extracted: {path}")
+          EOF
 
-            if [ -n "$ROOT_DIR" ]; then
-              echo "📁 Detected project structure inside: $ROOT_DIR"
-              shopt -s dotglob nullglob
-              cp -rf "$ROOT_DIR"/* .
-            else
-              echo "Moving raw extracted files to root..."
-              shopt -s dotglob nullglob
-              cp -rf temp_extracted/* .
-            fi
-            
-            rm -rf temp_extracted
-            echo "✅ Files successfully unpacked and arranged!"
-          else
-            echo "ℹ️ No .zip file found. Proceeding with repository files."
-          fi
-
-      # ─── گام ۲: نصب جاوا ۱۷ (بدون کش تا ارور ندهد) ─────────────────────
-      - name: ☕ Setup JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      # ─── گام ۳: راه‌اندازی SDK اندروید ────────────────────────────────
-      - name: 📱 Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      # ─── گام ۴: اطمینان از وجود AndroidManifest.xml ───────────────────
-      - name: 📄 Ensure AndroidManifest.xml Exists
+      # مرحله ۲: ساخت فایل‌های حیاتی فراموش‌شده (AndroidManifest و Strings و تم اولیه)
+      - name: Ensure Missing Critical Android Resources
         run: |
+          # ساخت AndroidManifest در صورت عدم وجود
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/mipmap-hdpi
+
           if [ ! -f "app/src/main/AndroidManifest.xml" ]; then
-            echo "⚠️ AndroidManifest.xml missing! Creating standard manifest..."
-            mkdir -p app/src/main
             cat << 'EOF' > app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-              <uses-permission android:name="android.permission.INTERNET" />
-              <uses-permission android:name="android.permission.VIBRATE" />
-
               <application
                   android:allowBackup="true"
                   android:icon="@android:drawable/sym_def_app_icon"
@@ -83,11 +60,9 @@ jobs:
                   android:roundIcon="@android:drawable/sym_def_app_icon"
                   android:supportsRtl="true"
                   android:theme="@android:style/Theme.Material.NoActionBar">
-                  
                   <activity
                       android:name=".MainActivity"
-                      android:exported="true"
-                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+                      android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
@@ -96,84 +71,103 @@ jobs:
               </application>
           </manifest>
           EOF
-            echo "✅ AndroidManifest.xml ready."
-          else
-            echo "✅ AndroidManifest.xml already exists."
+            echo "Generated default AndroidManifest.xml"
           fi
 
-      # ─── گام ۵: ترمیم خودکار گریدل و Wrapper ──────────────────────────
-      - name: 🔧 Auto-Heal Gradle Wrapper
+          if [ ! -f "app/src/main/res/values/strings.xml" ]; then
+            cat << 'EOF' > app/src/main/res/values/strings.xml
+          <resources>
+              <string name="app_name">LingoWorld</string>
+          </resources>
+          EOF
+          fi
+
+      # مرحله ۳: تنظیم اولیه جاوا ۱۷
+      - name: Setup Primary JDK (Java 17)
+        id: setup-java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # مرحله ۴: آماده‌سازی مجوزها و بررسی سلامت اسکریپت gradlew
+      - name: Prepare Gradle Permissions & Wrapper
         run: |
-          if [ -f "gradlew" ]; then
-            chmod +x gradlew
-          else
-            echo "⚠️ gradlew not found! Generating wrapper..."
-            gradle wrapper --gradle-version 8.7
-            chmod +x gradlew
-          fi
-
+          chmod +x ./gradlew 2>/dev/null || true
+          # در صورتی که فایل gradlew یا wrapper jar آسیب دیده باشد:
           if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "⚠️ Downloading missing gradle-wrapper.jar..."
-            mkdir -p gradle/wrapper
-            curl -sLo gradle/wrapper/gradle-wrapper.jar \
-              https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar || true
+            echo "Wrapper JAR missing. Installing Gradle manually to regenerate wrapper..."
+            sudo apt-get update && sudo apt-get install -y gradle || true
+            gradle wrapper || true
+            chmod +x ./gradlew || true
           fi
 
-      # ─── گام ۶: بیلد حالت اول (استاندارد) ──────────────────────────────
-      - name: 🚀 [Mode 1] Standard Full Build
-        id: build_standard
-        continue-on-error: true
+      # مرحله ۵: استراتژی چندمرحله‌ای ضدخطا برای Build APK
+      - name: Resilient Multi-Strategy Build
         run: |
-          ./gradlew assembleDebug assembleRelease \
-            --stacktrace \
-            -Dorg.gradle.jvmargs="-Xmx3072m -XX:MaxMetaspaceSize=768m"
+          set +e # جلوگیری از توقف فوری برای اجرای استراتژی‌های بعدی
 
-      # ─── گام ۷: بیلد حالت دوم (پشتیبان Debug ایمن) ─────────────────────
-      - name: 🛡️ [Mode 2 - Fallback] Build Debug APK Safe Mode
-        id: build_fallback
-        if: steps.build_standard.outcome == 'failure'
-        continue-on-error: true
-        run: |
-          echo "⚠️ Switching to Fallback Mode (Debug only, skipping Lint/Tests)..."
-          ./gradlew assembleDebug \
-            -x test \
-            -x lint \
-            -x lintVitalAnalyzeRelease \
-            --stacktrace \
-            -Dorg.gradle.jvmargs="-Xmx3072m -XX:MaxMetaspaceSize=768m"
+          echo "=========================================="
+          echo ">>> STRATEGY 1: Standard Gradle AssembleDebug"
+          echo "=========================================="
+          ./gradlew assembleDebug --no-daemon --stacktrace
+          STATUS=$?
 
-      # ─── گام ۸: بیلد حالت اضطراری (حداقل مصرف رم) ─────────────────────
-      - name: 🚑 [Mode 3 - Extreme Fallback] Minimal Memory Build
-        if: steps.build_standard.outcome == 'failure' && steps.build_fallback.outcome == 'failure'
-        run: |
-          echo "⚠️ Retrying with minimal resources and no-daemon..."
-          ./gradlew assembleDebug \
-            --no-daemon \
-            --max-workers=2 \
-            -x test \
-            -x lint \
-            -Dorg.gradle.jvmargs="-Xmx2048m"
+          if [ $STATUS -ne 0 ]; then
+            echo "=========================================="
+            echo ">>> STRATEGY 1 FAILED! Switching to STRATEGY 2: Clean Build without Cache & Lint"
+            echo "=========================================="
+            ./gradlew clean assembleDebug -x lint -x test --no-build-cache --no-daemon
+            STATUS=$?
+          fi
 
-      # ─── گام ۹: جمع‌آوری خروجی‌های APK ────────────────────────────────
-      - name: 🔍 Collect Output APKs
-        run: |
-          mkdir -p final_apks
-          find app/build/outputs/apk -type f -name "*.apk" | while read file; do
-            echo "Found: $file"
-            cp "$file" final_apks/
-          done
+          if [ $STATUS -ne 0 ]; then
+            echo "=========================================="
+            echo ">>> STRATEGY 2 FAILED! Switching to STRATEGY 3: Adjusting Memory & JVM Args"
+            echo "=========================================="
+            export GRADLE_OPTS="-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8"
+            ./gradlew assembleDebug -x lint -x test -x kspKotlin --no-daemon
+            STATUS=$?
+          fi
 
-          COUNT=$(ls -1 final_apks/*.apk 2>/dev/null | wc -l)
-          if [ "$COUNT" -eq 0 ]; then
-            echo "❌ No APK was generated!"
+          if [ $STATUS -ne 0 ]; then
+            echo "=========================================="
+            echo ">>> STRATEGY 3 FAILED! Switching to STRATEGY 4: System Installed Gradle Fallback"
+            echo "=========================================="
+            sudo apt-get install -y gradle
+            gradle assembleDebug -x lint -x test --no-daemon
+            STATUS=$?
+          fi
+
+          # بررسی نهایی برای پیدا کردن APK خروجی
+          APK_PATH=$(find app/build/outputs/apk/ -type f -name "*.apk" 2>/dev/null | head -n 1)
+
+          if [ -n "$APK_PATH" ] && [ -f "$APK_PATH" ]; then
+            echo "SUCCESS: APK Generated successfully at $APK_PATH"
+            mkdir -p ./build_output
+            cp "$APK_PATH" ./build_output/lingoworld-debug.apk
+            exit 0
+          else
+            echo "CRITICAL: Could not produce APK with any strategy."
             exit 1
           fi
-          echo "🎉 Successfully collected $COUNT APK file(s)."
 
-      # ─── گام ۱۰: آپلود فایل خروجی APK ─────────────────────────────────
-      - name: 📦 Upload APK
+      # مرحله ۶: ذخیره و دانلود فایل APK تولید شده در تب Artifacts گیت‌هاب
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: LingoWorld-APK
-          path: final_apks/*.apk
+          path: ./build_output/*.apk
           retention-days: 14
+
+      # مرحله ۷: انتشار اتوماتیک Release در صورت موفقیت (اختیاری)
+      - name: Create GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v1.0.0-build-${{ github.run_number }}"
+          name: "LingoWorld Build #${{ github.run_number }}"
+          files: ./build_output/lingoworld-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
