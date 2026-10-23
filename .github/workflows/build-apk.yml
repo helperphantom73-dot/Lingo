@@ -5,7 +5,7 @@ on:
     branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch: # دکمه اجرای دستی
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,21 +21,11 @@ jobs:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: ☕ Setup JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-          cache: 'gradle'
-
-      - name: 📱 Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      # ─── گام ۱: شناسایی خودکار، اکسترکت و مرتب‌سازی فایل زیپ ───────────
+      # ─── گام ۱: باز کردن زیپ به عنوان اولین قدم ─────────────────────────
       - name: 📦 Detect, Unzip & Auto-Arrange Project
         run: |
-          echo "🔍 Checking for ZIP files in repository..."
-          ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" | head -n 1)
+          echo "🔍 Searching for ZIP archive..."
+          ZIP_FILE=$(find . -maxdepth 3 -type f -iname "*.zip" | head -n 1)
 
           if [ -n "$ZIP_FILE" ]; then
             echo "📦 Found ZIP file: $ZIP_FILE"
@@ -43,12 +33,11 @@ jobs:
             mkdir -p temp_extracted
             unzip -o -q "$ZIP_FILE" -d temp_extracted
 
-            # پیدا کردن پوشه‌ای که حاوی settings.gradle یا build.gradle است
+            # پیدا کردن پوشه اصلی پروژه داخل زیپ
             ROOT_DIR=$(find temp_extracted -type f \( -name "settings.gradle.kts" -o -name "settings.gradle" -o -name "build.gradle.kts" \) -exec dirname {} \; | head -n 1)
 
             if [ -n "$ROOT_DIR" ]; then
               echo "📁 Detected project structure inside: $ROOT_DIR"
-              # انتقال محتویات به ریشه اصلی
               shopt -s dotglob nullglob
               cp -rf "$ROOT_DIR"/* .
             else
@@ -60,14 +49,25 @@ jobs:
             rm -rf temp_extracted
             echo "✅ Files successfully unpacked and arranged!"
           else
-            echo "ℹ️ No .zip file found. Using existing repository files."
+            echo "ℹ️ No .zip file found. Proceeding with repository files."
           fi
 
-      # ─── گام ۲: بررسی و ساخت خودکار AndroidManifest.xml (در صورت نبود) ───
+      # ─── گام ۲: نصب جاوا ۱۷ (بدون کش تا ارور ندهد) ─────────────────────
+      - name: ☕ Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # ─── گام ۳: راه‌اندازی SDK اندروید ────────────────────────────────
+      - name: 📱 Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ─── گام ۴: اطمینان از وجود AndroidManifest.xml ───────────────────
       - name: 📄 Ensure AndroidManifest.xml Exists
         run: |
           if [ ! -f "app/src/main/AndroidManifest.xml" ]; then
-            echo "⚠️ AndroidManifest.xml not found! Generating default manifest..."
+            echo "⚠️ AndroidManifest.xml missing! Creating standard manifest..."
             mkdir -p app/src/main
             cat << 'EOF' > app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
@@ -96,12 +96,12 @@ jobs:
               </application>
           </manifest>
           EOF
-            echo "✅ AndroidManifest.xml created successfully."
+            echo "✅ AndroidManifest.xml ready."
           else
             echo "✅ AndroidManifest.xml already exists."
           fi
 
-      # ─── گام ۳: ترمیم دسترسی‌ها و فایل‌های گریدل ───────────────────────
+      # ─── گام ۵: ترمیم خودکار گریدل و Wrapper ──────────────────────────
       - name: 🔧 Auto-Heal Gradle Wrapper
         run: |
           if [ -f "gradlew" ]; then
@@ -119,7 +119,7 @@ jobs:
               https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar || true
           fi
 
-      # ─── گام ۴: بیلد حالت اول (استاندارد کامل) ────────────────────────
+      # ─── گام ۶: بیلد حالت اول (استاندارد) ──────────────────────────────
       - name: 🚀 [Mode 1] Standard Full Build
         id: build_standard
         continue-on-error: true
@@ -128,7 +128,7 @@ jobs:
             --stacktrace \
             -Dorg.gradle.jvmargs="-Xmx3072m -XX:MaxMetaspaceSize=768m"
 
-      # ─── گام ۵: حالت جایگزین (بیلد بدون لکنت و بدون ارور تست/لینت) ─────
+      # ─── گام ۷: بیلد حالت دوم (پشتیبان Debug ایمن) ─────────────────────
       - name: 🛡️ [Mode 2 - Fallback] Build Debug APK Safe Mode
         id: build_fallback
         if: steps.build_standard.outcome == 'failure'
@@ -142,7 +142,7 @@ jobs:
             --stacktrace \
             -Dorg.gradle.jvmargs="-Xmx3072m -XX:MaxMetaspaceSize=768m"
 
-      # ─── گام ۶: حالت اضطراری (حداقل مصرف رم) ──────────────────────────
+      # ─── گام ۸: بیلد حالت اضطراری (حداقل مصرف رم) ─────────────────────
       - name: 🚑 [Mode 3 - Extreme Fallback] Minimal Memory Build
         if: steps.build_standard.outcome == 'failure' && steps.build_fallback.outcome == 'failure'
         run: |
@@ -154,7 +154,7 @@ jobs:
             -x lint \
             -Dorg.gradle.jvmargs="-Xmx2048m"
 
-      # ─── گام ۷: جمع‌آوری خروجی‌های APK ──────────────────────────────
+      # ─── گام ۹: جمع‌آوری خروجی‌های APK ────────────────────────────────
       - name: 🔍 Collect Output APKs
         run: |
           mkdir -p final_apks
@@ -170,7 +170,7 @@ jobs:
           fi
           echo "🎉 Successfully collected $COUNT APK file(s)."
 
-      # ─── گام ۸: آپلود نهایی برای دانلود ──────────────────────────────
+      # ─── گام ۱۰: آپلود فایل خروجی APK ─────────────────────────────────
       - name: 📦 Upload APK
         uses: actions/upload-artifact@v4
         with:
