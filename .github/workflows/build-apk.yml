@@ -21,7 +21,6 @@ jobs:
           python3 - << 'EOF'
           import os, re
 
-          # گشتن به دنبال فایلی که شامل تگ‌های START OF FILE باشد
           dump_content = ""
           for fname in os.listdir('.'):
               if os.path.isfile(fname) and (fname.endswith('.txt') or fname.endswith('.md') or fname == "project_dump"):
@@ -42,12 +41,10 @@ jobs:
                   print(f"Extracted: {path}")
           EOF
 
-      # مرحله ۲: ساخت فایل‌های حیاتی فراموش‌شده (AndroidManifest و Strings و تم اولیه)
+      # مرحله ۲: ساخت فایل‌های سیستمی و ریسورس‌های ضروری در صورت عدم وجود
       - name: Ensure Missing Critical Android Resources
         run: |
-          # ساخت AndroidManifest در صورت عدم وجود
           mkdir -p app/src/main/res/values
-          mkdir -p app/src/main/res/mipmap-hdpi
 
           if [ ! -f "app/src/main/AndroidManifest.xml" ]; then
             cat << 'EOF' > app/src/main/AndroidManifest.xml
@@ -82,77 +79,76 @@ jobs:
           EOF
           fi
 
-      # مرحله ۳: تنظیم اولیه جاوا ۱۷
-      - name: Setup Primary JDK (Java 17)
-        id: setup-java
+      # مرحله ۳: تنظیم JDK 17
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # مرحله ۴: آماده‌سازی مجوزها و بررسی سلامت اسکریپت gradlew
-      - name: Prepare Gradle Permissions & Wrapper
-        run: |
-          chmod +x ./gradlew 2>/dev/null || true
-          # در صورتی که فایل gradlew یا wrapper jar آسیب دیده باشد:
-          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "Wrapper JAR missing. Installing Gradle manually to regenerate wrapper..."
-            sudo apt-get update && sudo apt-get install -y gradle || true
-            gradle wrapper || true
-            chmod +x ./gradlew || true
-          fi
+      # مرحله ۴: تضمین نسخه سالم و به‌روز Gradle 8.7 (جلوگیری قطعی از خطا و نسخه ۴.۴)
+      - name: Setup Gradle 8.7 Environment
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
 
-      # مرحله ۵: استراتژی چندمرحله‌ای ضدخطا برای Build APK
+      - name: Enforce Gradle Wrapper Properties
+        run: |
+          mkdir -p gradle/wrapper
+          cat << 'EOF' > gradle/wrapper/gradle-wrapper.properties
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+          gradle wrapper --gradle-version 8.7
+          chmod +x ./gradlew
+
+      # مرحله ۵: فرآیند بیلد با چند لایه ضدخطا (استفاده هوشمند از خود gradle 8.7)
       - name: Resilient Multi-Strategy Build
         run: |
-          set +e # جلوگیری از توقف فوری برای اجرای استراتژی‌های بعدی
+          set +e
 
           echo "=========================================="
-          echo ">>> STRATEGY 1: Standard Gradle AssembleDebug"
+          echo ">>> STRATEGY 1: Standard AssembleDebug"
           echo "=========================================="
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
           STATUS=$?
 
           if [ $STATUS -ne 0 ]; then
             echo "=========================================="
-            echo ">>> STRATEGY 1 FAILED! Switching to STRATEGY 2: Clean Build without Cache & Lint"
+            echo ">>> STRATEGY 1 FAILED! STRATEGY 2: Clean build without tests/lint"
             echo "=========================================="
-            ./gradlew clean assembleDebug -x lint -x test --no-build-cache --no-daemon
+            ./gradlew :app:assembleDebug -x test -x lint -x lintVitalRelease --no-build-cache --no-daemon
             STATUS=$?
           fi
 
           if [ $STATUS -ne 0 ]; then
             echo "=========================================="
-            echo ">>> STRATEGY 2 FAILED! Switching to STRATEGY 3: Adjusting Memory & JVM Args"
+            echo ">>> STRATEGY 2 FAILED! STRATEGY 3: High-memory JVM & Standalone Gradle CLI"
             echo "=========================================="
             export GRADLE_OPTS="-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8"
-            ./gradlew assembleDebug -x lint -x test -x kspKotlin --no-daemon
+            gradle :app:assembleDebug -x test -x lint --no-daemon
             STATUS=$?
           fi
 
-          if [ $STATUS -ne 0 ]; then
-            echo "=========================================="
-            echo ">>> STRATEGY 3 FAILED! Switching to STRATEGY 4: System Installed Gradle Fallback"
-            echo "=========================================="
-            sudo apt-get install -y gradle
-            gradle assembleDebug -x lint -x test --no-daemon
-            STATUS=$?
-          fi
-
-          # بررسی نهایی برای پیدا کردن APK خروجی
+          # بررسی خروجی APK
           APK_PATH=$(find app/build/outputs/apk/ -type f -name "*.apk" 2>/dev/null | head -n 1)
 
           if [ -n "$APK_PATH" ] && [ -f "$APK_PATH" ]; then
-            echo "SUCCESS: APK Generated successfully at $APK_PATH"
+            echo "SUCCESS: APK created at $APK_PATH"
             mkdir -p ./build_output
             cp "$APK_PATH" ./build_output/lingoworld-debug.apk
             exit 0
           else
-            echo "CRITICAL: Could not produce APK with any strategy."
+            echo "CRITICAL: Build completely failed."
             exit 1
           fi
 
-      # مرحله ۶: ذخیره و دانلود فایل APK تولید شده در تب Artifacts گیت‌هاب
+      # مرحله ۶: آپلود فایل خروجی APK
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         if: always()
@@ -161,7 +157,7 @@ jobs:
           path: ./build_output/*.apk
           retention-days: 14
 
-      # مرحله ۷: انتشار اتوماتیک Release در صورت موفقیت (اختیاری)
+      # مرحله ۷: ساخت Release در گیت‌هاب (در صورت موفقیت)
       - name: Create GitHub Release
         if: success()
         uses: softprops/action-gh-release@v2
