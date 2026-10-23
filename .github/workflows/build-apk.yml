@@ -1,4 +1,4 @@
-name: Generate Project And Build APK
+name: Unzip And Build APK
 
 on:
   push:
@@ -12,143 +12,41 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      # ساخت ۱۰۰٪ مستقیم تمام فایل‌های پروژه اندروید
-      - name: Recreate Complete Android Project Structure
+      # ۱. آنزیپ کردن فایل زیپ پروژه
+      - name: Extract lingoworld-fixed.zip
         run: |
-          mkdir -p gradle/wrapper
-          mkdir -p app/src/main/java/com/lingoworld/app/data/datastore
-          mkdir -p app/src/main/java/com/lingoworld/app/data/model
-          mkdir -p app/src/main/java/com/lingoworld/app/data/room
-          mkdir -p app/src/main/java/com/lingoworld/app/engine
-          mkdir -p app/src/main/java/com/lingoworld/app/ui/components
-          mkdir -p app/src/main/java/com/lingoworld/app/ui/screens/onboarding
-          mkdir -p app/src/main/java/com/lingoworld/app/ui/theme
+          if [ -f "lingoworld-fixed.zip" ]; then
+            echo "Unzipping lingoworld-fixed.zip..."
+            unzip -o lingoworld-fixed.zip -d ./extracted_project
+            # انتقال فایل‌ها به روت اصلی
+            cd extracted_project
+            # پیدا کردن پوشه‌ای که حاوی settings.gradle یا app است
+            if [ -d "app" ] || [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
+              cp -r ./* ../
+            else
+              # اگر داخل یک زیرپوشه زیپ شده بود
+              SUBDIR=$(find . -maxdepth 2 -type d -name "app" -exec dirname {} \; | head -n 1)
+              if [ -n "$SUBDIR" ]; then
+                cp -r $SUBDIR/* ../
+              else
+                cp -r ./* ../
+              fi
+            fi
+            cd ..
+            rm -rf extracted_project
+          else
+            echo "File lingoworld-fixed.zip not found, checking existing files..."
+          fi
+
+      # ۲. مطمئن شدن از وجود AndroidManifest در صورت فراموشی در سورس
+      - name: Ensure AndroidManifest
+        run: |
           mkdir -p app/src/main/res/values
-
-          # 1. settings.gradle.kts
-          cat << 'EOF' > settings.gradle.kts
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          rootProject.name = "LingoWorld"
-          include(":app")
-          EOF
-
-          # 2. build.gradle.kts (Root)
-          cat << 'EOF' > build.gradle.kts
-          plugins {
-              id("com.android.application") version "8.4.1" apply false
-              id("org.jetbrains.kotlin.android") version "1.9.23" apply false
-              id("com.google.devtools.ksp") version "1.9.23-1.0.20" apply false
-          }
-          EOF
-
-          # 3. gradle-wrapper.properties
-          cat << 'EOF' > gradle/wrapper/gradle-wrapper.properties
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip
-          networkTimeout=10000
-          validateDistributionUrl=true
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-
-          # 4. app/build.gradle.kts
-          cat << 'EOF' > app/build.gradle.kts
-          plugins {
-              id("com.android.application")
-              id("org.jetbrains.kotlin.android")
-              id("com.google.devtools.ksp")
-          }
-
-          android {
-              namespace = "com.lingoworld.app"
-              compileSdk = 34
-
-              defaultConfig {
-                  applicationId = "com.lingoworld.app"
-                  minSdk = 26
-                  targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0.0"
-                  testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-                  vectorDrawables { useSupportLibrary = true }
-              }
-
-              buildTypes {
-                  release {
-                      isMinifyEnabled = false
-                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-                  }
-              }
-              compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
-              }
-              kotlinOptions {
-                  jvmTarget = "17"
-              }
-              buildFeatures {
-                  compose = true
-              }
-              composeOptions {
-                  kotlinCompilerExtensionVersion = "1.5.11"
-              }
-              packaging {
-                  resources {
-                      excludes += "/META-INF/{AL2.0,LGPL2.1}"
-                  }
-              }
-          }
-
-          dependencies {
-              implementation("androidx.core:core-ktx:1.13.1")
-              implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-              implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
-              implementation("androidx.activity:activity-compose:1.9.0")
-              implementation(platform("androidx.compose:compose-bom:2024.05.00"))
-              implementation("androidx.compose.ui:ui")
-              implementation("androidx.compose.ui:ui-graphics")
-              implementation("androidx.compose.ui:ui-tooling-preview")
-              implementation("androidx.compose.material3:material3")
-              implementation("androidx.compose.material:material-icons-extended")
-              implementation("androidx.navigation:navigation-compose:2.7.7")
-              val roomVersion = "2.6.1"
-              implementation("androidx.room:room-runtime:$roomVersion")
-              implementation("androidx.room:room-ktx:$roomVersion")
-              ksp("androidx.room:room-compiler:$roomVersion")
-              implementation("androidx.datastore:datastore-preferences:1.1.1")
-              implementation("androidx.work:work-runtime-ktx:2.9.0")
-              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
-          }
-          EOF
-
-          # 5. app/src/main/AndroidManifest.xml
-          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          if [ ! -f "app/src/main/AndroidManifest.xml" ]; then
+            cat << 'EOF' > app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <application
@@ -169,56 +67,34 @@ jobs:
               </application>
           </manifest>
           EOF
+          fi
 
-          # 6. strings.xml
-          cat << 'EOF' > app/src/main/res/values/strings.xml
-          <resources>
-              <string name="app_name">LingoWorld</string>
-          </resources>
-          EOF
+      # ۳. تنظیم جاوا ۱۷
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
-          # 7. proguard-rules.pro
-          cat << 'EOF' > app/proguard-rules.pro
-          -keepattributes *Annotation*
-          -keepclassmembers class * {
-              @androidx.room.* <methods>;
-          }
-          EOF
-
-          # بررسی اگر کدهای سورس روی مخزن نیستند، از فایل متنی استخراج شوند
-          python3 - << 'PYEOF'
-          import os, re
-          for root, dirs, files in os.walk('.'):
-              for f in files:
-                  if f.endswith(('.txt', '.md', '.log', '.dump')) or f in ['code', 'dump']:
-                      try:
-                          with open(os.path.join(root, f), 'r', encoding='utf-8', errors='ignore') as fp:
-                              txt = fp.read()
-                              if "--- START OF FILE" in txt:
-                                  for p, b, _ in re.findall(r'---\s*START OF FILE\s+([^\s\-]+)\s*---\n(.*?)((?=---\s*START OF FILE)|$)', txt, re.DOTALL):
-                                      p = p.strip()
-                                      os.makedirs(os.path.dirname(p), exist_ok=True)
-                                      with open(p, 'w', encoding='utf-8') as out:
-                                          out.write(b.strip() + "\n")
-                                      print("Extracted from file:", p)
-                      except Exception:
-                          pass
-          PYEOF
-
-      # آماده کردن گریدل اختصاصی و مجوزها
+      # ۴. تنظیم گریدل ۸.۷ پایدار
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.7'
 
-      # ساخت فایل APK
-      - name: Build APK with Gradle CLI
+      # ۵. بیلد کردن فایل APK با Android SDK پیش‌فرض سیستم گیت‌هاب
+      - name: Build APK
         run: |
-          # پذیرش لایسنس‌های اندروید
-          yes | sdkmanager --licenses || true
-          gradle :app:assembleDebug -x test -x lint --stacktrace
+          chmod +x ./gradlew 2>/dev/null || true
+          
+          # اگر فایل gradlew وجود داشت با اون اجرا کن، وگرنه با gradle سیستمی
+          if [ -f "./gradlew" ]; then
+            ./gradlew assembleDebug -x test -x lint --stacktrace
+          else
+            gradle assembleDebug -x test -x lint --stacktrace
+          fi
 
-      # ذخیره و دانلود فایل APK
+      # ۶. خروجی و دانلود فایل APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         if: always()
@@ -226,6 +102,7 @@ jobs:
           name: LingoWorld-APK
           path: app/build/outputs/apk/debug/*.apk
 
+      # ۷. ساخت ریلیز در گیت‌هاب
       - name: Create Release
         if: success()
         uses: softprops/action-gh-release@v2
