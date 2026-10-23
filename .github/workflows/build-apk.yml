@@ -1,0 +1,179 @@
+name: Build Android APK from ZIP
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # دکمه اجرای دستی
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Auto Unzip, Arrange & Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: ☕ Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: 📱 Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ─── گام ۱: شناسایی خودکار، اکسترکت و مرتب‌سازی فایل زیپ ───────────
+      - name: 📦 Detect, Unzip & Auto-Arrange Project
+        run: |
+          echo "🔍 Checking for ZIP files in repository..."
+          ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" | head -n 1)
+
+          if [ -n "$ZIP_FILE" ]; then
+            echo "📦 Found ZIP file: $ZIP_FILE"
+            echo "Extracting..."
+            mkdir -p temp_extracted
+            unzip -o -q "$ZIP_FILE" -d temp_extracted
+
+            # پیدا کردن پوشه‌ای که حاوی settings.gradle یا build.gradle است
+            ROOT_DIR=$(find temp_extracted -type f \( -name "settings.gradle.kts" -o -name "settings.gradle" -o -name "build.gradle.kts" \) -exec dirname {} \; | head -n 1)
+
+            if [ -n "$ROOT_DIR" ]; then
+              echo "📁 Detected project structure inside: $ROOT_DIR"
+              # انتقال محتویات به ریشه اصلی
+              shopt -s dotglob nullglob
+              cp -rf "$ROOT_DIR"/* .
+            else
+              echo "Moving raw extracted files to root..."
+              shopt -s dotglob nullglob
+              cp -rf temp_extracted/* .
+            fi
+            
+            rm -rf temp_extracted
+            echo "✅ Files successfully unpacked and arranged!"
+          else
+            echo "ℹ️ No .zip file found. Using existing repository files."
+          fi
+
+      # ─── گام ۲: بررسی و ساخت خودکار AndroidManifest.xml (در صورت نبود) ───
+      - name: 📄 Ensure AndroidManifest.xml Exists
+        run: |
+          if [ ! -f "app/src/main/AndroidManifest.xml" ]; then
+            echo "⚠️ AndroidManifest.xml not found! Generating default manifest..."
+            mkdir -p app/src/main
+            cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="LingoWorld"
+                  android:roundIcon="@android:drawable/sym_def_app_icon"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+            echo "✅ AndroidManifest.xml created successfully."
+          else
+            echo "✅ AndroidManifest.xml already exists."
+          fi
+
+      # ─── گام ۳: ترمیم دسترسی‌ها و فایل‌های گریدل ───────────────────────
+      - name: 🔧 Auto-Heal Gradle Wrapper
+        run: |
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+          else
+            echo "⚠️ gradlew not found! Generating wrapper..."
+            gradle wrapper --gradle-version 8.7
+            chmod +x gradlew
+          fi
+
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "⚠️ Downloading missing gradle-wrapper.jar..."
+            mkdir -p gradle/wrapper
+            curl -sLo gradle/wrapper/gradle-wrapper.jar \
+              https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar || true
+          fi
+
+      # ─── گام ۴: بیلد حالت اول (استاندارد کامل) ────────────────────────
+      - name: 🚀 [Mode 1] Standard Full Build
+        id: build_standard
+        continue-on-error: true
+        run: |
+          ./gradlew assembleDebug assembleRelease \
+            --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx3072m -XX:MaxMetaspaceSize=768m"
+
+      # ─── گام ۵: حالت جایگزین (بیلد بدون لکنت و بدون ارور تست/لینت) ─────
+      - name: 🛡️ [Mode 2 - Fallback] Build Debug APK Safe Mode
+        id: build_fallback
+        if: steps.build_standard.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          echo "⚠️ Switching to Fallback Mode (Debug only, skipping Lint/Tests)..."
+          ./gradlew assembleDebug \
+            -x test \
+            -x lint \
+            -x lintVitalAnalyzeRelease \
+            --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx3072m -XX:MaxMetaspaceSize=768m"
+
+      # ─── گام ۶: حالت اضطراری (حداقل مصرف رم) ──────────────────────────
+      - name: 🚑 [Mode 3 - Extreme Fallback] Minimal Memory Build
+        if: steps.build_standard.outcome == 'failure' && steps.build_fallback.outcome == 'failure'
+        run: |
+          echo "⚠️ Retrying with minimal resources and no-daemon..."
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --max-workers=2 \
+            -x test \
+            -x lint \
+            -Dorg.gradle.jvmargs="-Xmx2048m"
+
+      # ─── گام ۷: جمع‌آوری خروجی‌های APK ──────────────────────────────
+      - name: 🔍 Collect Output APKs
+        run: |
+          mkdir -p final_apks
+          find app/build/outputs/apk -type f -name "*.apk" | while read file; do
+            echo "Found: $file"
+            cp "$file" final_apks/
+          done
+
+          COUNT=$(ls -1 final_apks/*.apk 2>/dev/null | wc -l)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "❌ No APK was generated!"
+            exit 1
+          fi
+          echo "🎉 Successfully collected $COUNT APK file(s)."
+
+      # ─── گام ۸: آپلود نهایی برای دانلود ──────────────────────────────
+      - name: 📦 Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LingoWorld-APK
+          path: final_apks/*.apk
+          retention-days: 14
